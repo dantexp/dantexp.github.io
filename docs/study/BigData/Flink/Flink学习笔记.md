@@ -3,7 +3,7 @@
 
 ## Flink 流处理Api
 
-### 1 Source
+### 1. Source
 #### 1.1 从集合读取数据
 ~~~ java
 // 创建执行环境
@@ -59,4 +59,39 @@ public static MySource() implements SourceFunction<T>{
         runFlag=false;
     }
 }
+~~~
+
+### 2. TransForm
+
+### 2.1 map 
+~~~ java
+// 输出字符串的长度
+inputStream.map(new MapFunction<String,Integer>(){
+    @Override
+    public Integer map(String value){
+        retunt value.length();
+    }
+});
+~~~
+### 2.2 flatMap
+~~~ java
+// 按逗号分字段
+inputStream.flatMap(new flatMapFunction<String,String>(){
+    @Override
+    public void flatMap(String value,Collector<String> out){
+        for(String filed:value.split(",")){
+            out.collect(filed);
+        }
+    }
+});
+~~~
+### 2.3 filter
+~~~ java
+// 筛选值大于三的数据
+inputStream.filter(new filterFunction<Integer>(){
+    @Override
+    public boolen filter(Integer value){
+        returm value > 3;
+    }
+});
 ~~~
