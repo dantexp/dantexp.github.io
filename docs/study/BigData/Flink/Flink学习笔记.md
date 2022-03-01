@@ -177,3 +177,87 @@ DataStream<SensorReading> dataStream = inputStream.map(new
     }
  });
 ~~~
+
+### 2.7 Split 和 Select
+
+**split**
+
+![map](images/split.PNG)
+
+DataStream → SplitStream：根据某些特征把一个 DataStream 拆分成两个或者多个 DataStream。
+
+**select**
+
+![map](images/select.PNG)
+
+SplitStream→DataStream：从一个 SplitStream 中获取一个或者多个DataStream。
+
+需求：传感器数据按照温度高低（以 30 度为界），拆分成两个流。
+~~~ java
+SplitStream<SensorReading> splitStream = dataStream.split(new
+OutputSelector<SensorReading>() {
+ @Override
+ public Iterable<String> select(SensorReading value) {
+ return (value.getTemperature() > 30) ? Collections.singletonList("high") :
+Collections.singletonList("low");
+ }
+});
+DataStream<SensorReading> highTempStream = splitStream.select("high");
+DataStream<SensorReading> lowTempStream = splitStream.select("low");
+DataStream<SensorReading> allTempStream = splitStream.select("high", "low");
+~~~
+
+
+### 2.8 Connect 和 CoMap
+
+**connect**
+
+![map](images/connect.PNG)
+
+DataStream,DataStream → ConnectedStreams：连接两个保持他们类型的数据流，两个数据流被 Connect 之后，只是被放在了一个同一个流中，内部依然保持各自的数据和形式不发生任何变化，两个流相互独立。
+
+
+**comap  coflatMap**
+
+![map](images/comap.PNG)
+
+ConnectedStreams → DataStream：作用于 ConnectedStreams 上，功能与 map和 flatMap 一样，对 ConnectedStreams 中的每一个 Stream 分别进行map 和 flatMap处理。
+
+
+~~~ java
+DataStream<Tuple2<String, Double>> warningStream = highTempStream.map(new
+MapFunction<SensorReading, Tuple2<String, Double>>() {
+ @Override
+ public Tuple2<String, Double> map(SensorReading value) throws Exception {
+ return new Tuple2<>(value.getId(), value.getTemperature());
+ }
+});
+ConnectedStreams<Tuple2<String, Double>, SensorReading> connectedStreams = warningStream.connect(lowTempStream);
+DataStream<Object> resultStream = connectedStreams.map(new
+CoMapFunction<Tuple2<String,Double>, SensorReading, Object>() {
+ @Override
+ public Object map1(Tuple2<String, Double> value) throws Exception {
+ return new Tuple3<>(value.f0, value.f1, "warning");
+ }
+ @Override
+ public Object map2(SensorReading value) throws Exception {
+ return new Tuple2<>(value.getId(), "healthy");
+ }
+});
+~~~
+
+
+### 2.9 union
+
+![map](images/union.PNG)
+
+DataStream → DataStream：对两个或者两个以上的 DataStream 进行 union 操作，产生一个包含所有 DataStream 元素的新 DataStream。
+
+~~~ java
+DataStream<SensorReading> unionStream = highTempStream.union(lowTempStream);
+~~~
+
+Connect 与 Union 区别:
+* Union 之前两个流的类型必须是一样，Connect 可以不一样，在之后的 coMap
+中再去调整成为一样的。
+* Connect 只能操作两个流，Union 可以操作多个。
