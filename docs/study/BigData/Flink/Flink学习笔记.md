@@ -161,7 +161,6 @@ new SensorReading("sensor_1", 1547718213L, 37.8),
 new SensorReading("sensor_7", 1547718202L, 6.7),
 new SensorReading("sensor_10", 1547718205L, 38.1)
 
-
 ~~~
 
 ### 2.6 Reduce
