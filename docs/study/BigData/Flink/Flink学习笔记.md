@@ -138,29 +138,27 @@ KeyedStream<T,String> keyedStream= dataStream.keyBy(p->p.getId());
 DataStream<T> resultStream = keyedStream.max("temperature");
 DataStream<T> resultStream = keyedStream.maxBy("temperature");
 resultStream.print();
-
-// max和maxBy的区别是  举例说明：以下是输入数据
-new SensorReading("sensor_1", 1547718199L, 35.8),
-new SensorReading("sensor_6", 1547718201L, 15.4),
-new SensorReading("sensor_1", 1547718200L, 36.8),
-new SensorReading("sensor_1", 1547718213L, 37.8),
-new SensorReading("sensor_7", 1547718202L, 6.7),
-new SensorReading("sensor_10", 1547718205L, 38.1)
+//max和maxBy的区别是  举例说明：以下是输入数据
+SensorReading ss=new SensorReading("sensor_1", 1547718199L, 35.8);
+new SensorReading("sensor_6", 1547718201L, 15.4);
+new SensorReading("sensor_1", 1547718200L, 36.8);
+new SensorReading("sensor_1", 1547718213L, 37.8);
+new SensorReading("sensor_7", 1547718202L, 6.7);
+new SensorReading("sensor_10", 1547718205L, 38.1);
 //max结果是
-new SensorReading("sensor_1", 1547718199L, 35.8)
-new SensorReading("sensor_6", 1547718201L, 15.4),
-new SensorReading("sensor_1", 1547718199L, 36.8),
-new SensorReading("sensor_1", 1547718199L, 37.8),
-new SensorReading("sensor_7", 1547718202L, 6.7),
-new SensorReading("sensor_10", 1547718205L, 38.1)
+new SensorReading("sensor_1", 1547718199L, 35.8);
+new SensorReading("sensor_6", 1547718201L, 15.4);
+new SensorReading("sensor_1", 1547718199L, 36.8);
+new SensorReading("sensor_1", 1547718199L, 37.8);
+new SensorReading("sensor_7", 1547718202L, 6.7);
+new SensorReading("sensor_10", 1547718205L, 38.1);
 //maxBy结果是
-new SensorReading("sensor_1", 1547718199L, 35.8),
-new SensorReading("sensor_6", 1547718201L, 15.4),
-new SensorReading("sensor_1", 1547718200L, 36.8),
-new SensorReading("sensor_1", 1547718213L, 37.8),
-new SensorReading("sensor_7", 1547718202L, 6.7),
-new SensorReading("sensor_10", 1547718205L, 38.1)
-
+new SensorReading("sensor_1", 1547718199L, 35.8);
+new SensorReading("sensor_6", 1547718201L, 15.4);
+new SensorReading("sensor_1", 1547718200L, 36.8);
+new SensorReading("sensor_1", 1547718213L, 37.8);
+new SensorReading("sensor_7", 1547718202L, 6.7);
+new SensorReading("sensor_10", 1547718205L, 38.1);
 ~~~
 
 ### 2.6 Reduce
