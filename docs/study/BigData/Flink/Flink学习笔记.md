@@ -413,3 +413,209 @@ public static class MyMapFunction extends RichMapFunction<SensorReading, Tuple2<
 
 
 ### 5. Sink
+Flink 没有类似于 spark 中 foreach 方法，让用户进行迭代的操作。虽有对外的输出操作都要利用 Sink 完成。最后通过类似如下方式完成整个任务最终输出操作。
+
+`stream.addSink(new MySink(xxxx)) `
+
+官方提供了一部分的框架的 sink。除此以外，需要用户自定义实现sink。
+
+
+![sink](images/sink.png)
+
+
+#### 5.1 Kafka
+
+```xml
+<dependency>
+ <groupId>org.apache.flink</groupId>
+ <artifactId>flink-connector-kafka-0.11_2.12</artifactId>
+ <version>1.10.1</version>
+</dependency>
+```
+
+
+```java
+dataStream.addSink(new FlinkKafkaProducer011[String]("localhost:9092", "test",new SimpleStringSchema()))
+```
+
+#### 5.2 Redis
+
+```xml
+<dependency>
+ <groupId>org.apache.bahir</groupId>
+ <artifactId>flink-connector-redis_2.11</artifactId>
+ <version>1.0</version>
+</dependency>
+```
+定义一个 redis 的 mapper 类，用于定义保存到 redis 时调用的命令：
+
+```java
+public static class MyRedisMapper implements RedisMapper<SensorReading>{
+ // 保存到 redis 的命令，存成哈希表
+ public RedisCommandDescription getCommandDescription() {
+ return new RedisCommandDescription(RedisCommand.HSET, "sensor_tempe");
+ }
+ public String getKeyFromData(SensorReading data) {
+ return data.getId();
+ }
+ public String getValueFromData(SensorReading data) {
+ return data.getTemperature().toString();
+ }
+}
+```
+
+在主函数中调用：
+```java
+FlinkJedisPoolConfig config = new FlinkJedisPoolConfig.Builder()
+ .setHost("localhost")
+ .setPort(6379)
+ .build();
+
+ dataStream.addSink( new RedisSink<SensorReading>(config, new MyRedisMapper()) );
+
+```
+
+#### 5.3 Elasticsearch
+
+```xml
+<dependency>
+ <groupId>org.apache.flink</groupId>
+ <artifactId>flink-connector-elasticsearch6_2.12</artifactId>
+ <version>1.10.1</version>
+</dependency>
+```
+
+在主函数中调用：
+
+```java
+// es 的 httpHosts 配置
+ArrayList<HttpHost> httpHosts = new ArrayList<>();
+httpHosts.add(new HttpHost("localhost", 9200));
+dataStream.addSink( new ElasticsearchSink.Builder<SensorReading>(httpHosts, new MyEsSinkFunction()).build());
+
+```
+ElasitcsearchSinkFunction 的实现
+
+```java
+public static class MyEsSinkFunction implements ElasticsearchSinkFunction<SensorReading>{
+ @Override
+ public void process(SensorReading element, RuntimeContext ctx, RequestIndexer indexer) {
+    HashMap<String, String> dataSource = new HashMap<>();
+    dataSource.put("id", element.getId());
+    dataSource.put("ts", element.getTimestamp().toString());
+    dataSource.put("temp", element.getTemperature().toString());
+    IndexRequest indexRequest = Requests.indexRequest()
+        .index("sensor")
+        .type("readingData")
+        .source(dataSource);
+    indexer.add(indexRequest);
+ }
+}
+```
+
+
+#### 5.4 JDBC 自定义sink
+```xml
+<dependency>
+ <groupId>mysql</groupId>
+ <artifactId>mysql-connector-java</artifactId>
+ <version>5.1.44</version>
+</dependency
+```
+
+添加 MyJdbcSink
+
+```java
+public static class MyJdbcSink extends RichSinkFunction<SensorReading> {
+    Connection conn = null;
+    PreparedStatement insertStmt = null;
+    PreparedStatement updateStmt = null;
+    // open 主要是创建连接
+    @Override
+    public void open(Configuration parameters) throws Exception {
+        conn = DriverManager.getConnection("jdbc:mysql://localhost:3306/test", "root", "123456");
+        // 创建预编译器，有占位符，可传入参数
+        insertStmt = conn.prepareStatement("INSERT INTO sensor_temp (id, temp) VALUES (?, ?)");
+        updateStmt = conn.prepareStatement("UPDATE sensor_temp SET temp = ? WHERE id = ?");
+    }
+    // 调用连接，执行 sql
+    @Override
+    public void invoke(SensorReading value, Context context) throws Exception {
+        // 执行更新语句，注意不要留 super
+        updateStmt.setDouble(1, value.getTemperature());
+        updateStmt.setString(2, value.getId());
+        updateStmt.execute();
+        // 如果刚才 update 语句没有更新，那么插入
+        if (updateStmt.getUpdateCount() == 0) {
+            insertStmt.setString(1, value.getId());
+            insertStmt.setDouble(2, value.getTemperature());
+            insertStmt.execute();
+            }
+    }
+    @Override
+    public void close() throws Exception {
+    insertStmt.close();
+    updateStmt.close();
+    conn.close();
+ }
+}
+```
+在 main 方法中增加，把明细保存到 mysql 中
+```java
+dataStream.addSink(new MyJdbcSink())
+```
+
+### 6.Flink 中的 Window
+
+ streaming 流式计算是一种被设计用于处理无限数据集的数据处理引擎，而无限数据集是指一种不断增长的本质上无限的数据集，而 window 是一种切割无限数据为有限块进行处理的手段。
+
+
+Window 是无限数据流处理的核心，Window 将一个无限的 stream 拆分成有限大小的”buckets”桶，我们可以在这些桶上做计算操作。
+
+
+
+Window 可以分成两类：
+* CountWindow：按照指定的数据条数生成一个 Window，与时间无关。
+    * 滚动计数窗口
+    * 滑动计数窗口
+* TimeWindow：按照时间生成 Window
+    * 滚动时间窗口
+    * 滑动时间窗口
+    * 会话窗口
+
+
+#### 6.1 滚动窗口（Tumbling Windows）不区分时间和计数
+
+将数据依据固定的窗口长度对数据进行切片。
+
+**特点：时间对齐，窗口长度固定，没有重叠。**
+
+滚动窗口分配器将每个元素分配到一个指定窗口大小的窗口中，滚动窗口有一
+个固定的大小，并且不会出现重叠。例如：如果你指定了一个 5 分钟大小的滚动窗
+口，窗口的创建如下图所示：
+
+![滚动窗口](images/TumblingWindows.png)
+
+#### 6.2 滑动窗口（Sliding Windows）
+
+滑动窗口是固定窗口的更广义的一种形式，滑动窗口由固定的窗口长度和滑动间隔组成。
+
+**特点：时间对齐，窗口长度固定，可以有重叠。**
+
+滑动窗口分配器将元素分配到固定长度的窗口中，与滚动窗口类似，窗口的大小由窗口大小参数来配置，另一个窗口滑动参数控制滑动窗口开始的频率。因此，滑动窗口如果滑动参数小于窗口大小的话，窗口是可以重叠的，在这种情况下元素会被分配到多个窗口中
+
+例如，你有 10 分钟的窗口和 5 分钟的滑动，那么每个窗口中 5 分钟的窗口里包
+含着上个 10 分钟产生的数据，如下图所示：
+
+![滑动窗口](images/SlidingWindows.png)
+
+
+#### 6.3 会话窗口（Session Windows）
+
+由一系列事件组合一个指定时间长度的 timeout 间隙组成，类似于 web 应用的session，也就是一段时间没有接收到新数据就会生成新的窗口。
+
+**特点：时间无对齐。**
+
+session 窗口分配器通过 session 活动来对元素进行分组，session 窗口跟滚动窗口和滑动窗口相比，不会有重叠和固定的开始时间和结束时间的情况，相反，当它在一个固定的时间周期内不再收到元素，即非活动间隔产生，那个这个窗口就会关闭。一个 session 窗口通过一个 session 间隔来配置，这个session间隔定义了非活跃周期的长度，当这个非活跃周期产生，那么当前的 session 将关闭并且后续的元素将被分配到新的 session 窗口中去。
+
+![会话窗口](images/SessionWindows.png)
