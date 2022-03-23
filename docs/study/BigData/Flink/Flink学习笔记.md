@@ -800,3 +800,307 @@ public class EventTimeTimerTest
 据生成了，整个程序运行结束将要退出，此时 Flink 会自动将水位线推进到长整型的最大值
 （Long.MAX_VALUE）。于是所有尚未触发的定时器这时就统一触发了，我们就在控制台看到
 了后两个定时器的触发信息。
+
+
+
+#### 7.3 窗口处理函数
+
+
+
+进行窗口计算，我们可以直接调用现成的简单聚合方法（sum/max/min）,也可以通过调
+用.reduce()或.aggregate()来自定义一般的增量聚合函数（ReduceFunction/AggregateFucntion）；
+而对于更加复杂、需要窗口信息和额外状态的一些场景，我们还可以直接使用全窗口函数、把
+数据全部收集保存在窗口内，等到触发窗口计算时再统一处理。窗口处理函数就是一种典型的
+全窗口函数。
+
+窗 口 处 理 函 数 ProcessWindowFunction 的 使 用 与 其 他 窗 口 函 数 类 似 ， 也 是 基 于
+WindowedStream 直接调用方法就可以，只不过这时调用的是.process()。
+
+``` java
+stream.keyBy( t -> t.f0 )
+ .window( TumblingEventTimeWindows.of(Time.seconds(10)) )
+ .process(new MyProcessWindowFunction())
+```
+
+
+#### 7.4 应用案例---Top N
+
+窗口的计算处理，在实际应用中非常常见。对于一些比较复杂的需求，如果增量聚合函数
+无法满足，我们就需要考虑使用窗口处理函数这样的“大招”了。
+
+网站中一个非常经典的例子，就是实时统计一段时间内的热门 url。例如，需要统计最近
+10 秒钟内最热门的两个 url 链接，并且每 5 秒钟更新一次。我们知道，这可以用一个滑动窗口
+来实现，而“热门度”一般可以直接用访问量来表示。于是就需要开滑动窗口收集 url 的访问
+数据，按照不同的 url 进行统计，而后汇总排序并最终输出前两名。这其实就是著名的“Top N”
+问题。
+
+很显然，简单的增量聚合可以得到 url 链接的访问量，但是后续的排序输出 Top N 就很难
+实现了。所以接下来我们用窗口处理函数进行实现。
+
+##### 7.4.1 使用 ProcessAllWindowFunction
+
+
+一种最简单的想法是，我们干脆不区分 url 链接，而是将所有访问数据都收集起来，统一
+进行统计计算。所以可以不做 keyBy，直接基于 DataStream 开窗，然后使用全窗口函数
+ProcessAllWindowFunction 来进行处理。
+
+```java
+public class ProcessAllWindowTopN
+{
+    public static void main(String[] args) throws Exception
+    {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        SingleOutputStreamOperator < Event > eventStream = env.addSource(new ClickSource()).assignTimestampsAndWatermarks(WatermarkStrategy. < Event > forMonotonousTimestamps().withTimestampAssigner(new SerializableTimestampAssigner < Event > ()
+        {
+            @Override
+            public long extractTimestamp(Event element, long recordTimestamp)
+            {
+                return element.timestamp;
+            }
+        }));
+        // 只需要 url 就可以统计数量，所以转换成 String 直接开窗统计
+        SingleOutputStreamOperator < String > result = eventStream.map(new MapFunction < Event, String > ()
+            {
+                @Override
+                public String map(Event value) throws Exception
+                {
+                    return value.url;
+                }
+            }).windowAll(SlidingEventTimeWindows.of(Time.seconds(10), Time.seconds(5))) // 开滑动窗口
+            .process(new ProcessAllWindowFunction < String, String, TimeWindow > ()
+            {
+                @Override
+                public void process(Context context, Iterable < String > elements, Collector < String > out) throws Exception
+                {
+                    HashMap < String, Long > urlCountMap = new HashMap < > ();
+                    // 遍历窗口中数据，将浏览量保存到一个 HashMap 中
+                    for(String url: elements)
+                    {
+                        if(urlCountMap.containsKey(url))
+                        {
+                            long count = urlCountMap.get(url);
+                            urlCountMap.put(url, count + 1 L);
+                        }
+                        else
+                        {
+                            urlCountMap.put(url, 1 L);
+                        }
+                    }
+                    ArrayList < Tuple2 < String, Long >> mapList = new
+                    ArrayList < Tuple2 < String, Long >> ();
+                    // 将浏览量数据放入 ArrayList，进行排序
+                    for(String key: urlCountMap.keySet())
+                    {
+                        mapList.add(Tuple2.of(key, urlCountMap.get(key)));
+                    }
+                    mapList.sort(new Comparator < Tuple2 < String, Long >> ()
+                    {
+                        @Override
+                        public int compare(Tuple2 < String, Long > o1, Tuple2 < String, Long > o2)
+                        {
+                            return o2.f1.intValue() - o1.f1.intValue();
+                        }
+                    });
+                    // 取排序后的前两名，构建输出结果
+                    StringBuilder result = new StringBuilder();
+                    result.append("========================================\n");
+                    for(int i = 0; i < 2; i++)
+                    {
+                        Tuple2 < String, Long > temp = mapList.get(i);
+                        String info = "浏览量 No." + (i + 1) + " url：" + temp.f0 + " 浏览量：" + temp.f1 + " 窗 口 结 束 时 间 ： " + new
+                        Timestamp(context.window().getEnd()) + "\n";
+                        result.append(info);
+                    }
+                    result.append("========================================\n");
+                    out.collect(result.toString());
+                }
+            });
+        result.print();
+        env.execute();
+    }
+}
+```
+
+
+##### 7.4.2 使用 KeyedProcessFunction 
+
+
+直接将所有数据放在一个分区上进行
+了开窗操作。这相当于将并行度强行设置为 1，在实际应用中是要尽量避免的，所以 Flink 官
+方也并不推荐使用 AllWindowedStream 进行处理。另外，我们在全窗口函数中定义了 HashMap
+来统计 url 链接的浏览量，计算过程是要先收集齐所有数据、然后再逐一遍历更新 HashMap，
+这显然不够高效。如果我们可以利用增量聚合函数的特性，每来一条数据就更新一次对应 url
+的浏览量，那么到窗口触发计算时只需要做排序输出就可以了。
+
+基于这样的想法，我们可以从两个方面去做优化：一是对数据进行按键分区，分别统计浏
+览量；二是进行增量聚合，得到结果最后再做排序输出。所以，我们可以使用增量聚合函数
+AggregateFunction 进行浏览量的统计，然后结合 ProcessWindowFunction 排序输出来实现 Top N
+的需求。
+
+具体实现思路就是，先按照 url 对数据进行 keyBy 分区，然后开窗进行增量聚合。这里就
+会发现一个问题：我们进行按键分区之后，窗口的计算就会只针对当前 key 有效了；也就是说，
+每个窗口的统计结果中，只会有一个 url 的浏览量，这是无法直接用 ProcessWindowFunction
+进行排序的。所以我们只能分成两步：先对每个 url 链接统计出浏览量，然后再将统计结果收
+集起来，排序输出最终结果。因为最后的排序还是基于每个时间窗口的，所以为了让输出的统
+计结果中包含窗口信息，我们可以借用第六章中定义的 POJO 类 UrlViewCount 来表示，它包
+含了 url、浏览量（count）以及窗口的起始结束时间。之后对 UrlViewCount 的处理，可以先按
+窗口分区，然后用 KeyedProcessFunction 来实现。
+总结处理流程如下：
+（1）读取数据源；
+（2）筛选浏览行为（pv）；
+（3）提取时间戳并生成水位线；
+（4）按照 url 进行 keyBy 分区操作；
+（5）开长度为 1 小时、步长为 5 分钟的事件时间滑动窗口；
+（6）使用增量聚合函数 AggregateFunction，并结合全窗口函数 WindowFunction 进行窗口
+聚合，得到每个 url、在每个统计窗口内的浏览量，包装成 UrlViewCount；
+（7）按照窗口进行 keyBy 分区操作；
+（8）对同一窗口的统计结果数据，使用 KeyedProcessFunction 进行收集并排序输出。
+
+糟糕的是，这里又会带来另一个问题。最后我们用 KeyedProcessFunction 来收集数据做排
+序，这时面对的就是窗口聚合之后的数据流，而窗口已经不存在了；那到底什么时候会收集齐
+所有数据呢？这问题听起来似乎有些没道理。我们统计浏览量的窗口已经关闭，就说明了当前
+已经到了要输出结果的时候，直接输出不就行了吗？
+
+没有这么简单。因为数据流中的元素是逐个到来的，所以即使理论上我们应该“同时”收
+到很多 url 的浏览量统计结果，实际也是有先后的、只能一条一条处理。下游任务（就是我们
+定义的 KeyedProcessFunction）看到一个 url 的统计结果，并不能保证这个时间段的统计数据
+不会再来了，所以也不能贸然进行排序输出。解决的办法，自然就是要等所有数据到齐了——
+这很容易让我们联想起水位线设置延迟时间的方法。这里我们也可以“多等一会儿”，等到水
+位线真正超过了窗口结束时间，要统计的数据就肯定到齐了。
+
+具体实现上，可以采用一个延迟触发的事件时间定时器。基于窗口的结束时间来设定延迟，
+其实并不需要等太久——因为我们是靠水位线的推进来触发定时器，而水位线的含义就是“之
+前的数据都到齐了”。所以我们只需要设置 1 毫秒的延迟，就一定可以保证这一点。
+而在等待过程中，之前已经到达的数据应该缓存起来，我们这里用一个自定义的“列表状
+态”（ListState）来进行存储，如图 7-2 所示。这个状态需要使用富函数类的 getRuntimeContext()
+方法获取运行时上下文来定义，我们一般把它放在 open()生命周期方法中。之后每来一个
+UrlViewCount，就把它添加到当前的列表状态中，并注册一个触发时间为窗口结束时间加 1
+毫秒（windowEnd + 1）的定时器。待到水位线到达这个时间，定时器触发，我们可以保证当
+前窗口所有 url 的统计结果 UrlViewCount 都到齐了；于是从状态中取出进行排序输出。
+
+```java
+public class KeyedProcessTopN
+{
+    
+    public static void main(String[] args) throws Exception
+        {
+            StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+            env.setParallelism(1);
+            // 从自定义数据源读取数据
+            SingleOutputStreamOperator < Event > eventStream = env.addSource(new ClickSource()).assignTimestampsAndWatermarks(WatermarkStrategy. < Event > forMonot onousTimestamps().withTimestampAssigner(new SerializableTimestampAssigner < Event > ()
+            {
+                @Override
+                public long extractTimestamp(Event element, long recordTimestamp)
+                {
+                    return element.timestamp;
+                }
+            }));
+            // 需要按照 url 分组，求出每个 url 的访问量
+            SingleOutputStreamOperator < UrlViewCount > urlCountStream = eventStream.keyBy(data - > data.url).window(SlidingEventTimeWindows.of(Time.seconds(10), Time.seconds(5))).aggregate(new UrlViewCountAgg(), new UrlViewCountResult());
+            // 对结果中同一个窗口的统计数据，进行排序处理
+            SingleOutputStreamOperator < String > result = urlCountStream.keyBy(data - > data.windowEnd).process(new TopN(2));
+            result.print("result");
+            env.execute();
+        }
+        // 自定义增量聚合
+    public static class UrlViewCountAgg implements AggregateFunction < Event, Long,
+    Long >
+        {
+            @Override
+            public Long createAccumulator()
+            {
+                return 0 L;
+            }
+            @Override
+            public Long add(Event value, Long accumulator)
+            {
+                return accumulator + 1;
+            }
+            @Override
+            public Long getResult(Long accumulator)
+            {
+                return accumulator;
+            }
+            @Override
+            public Long merge(Long a, Long b)
+            {
+                return null;
+            }
+        }
+        // 自定义全窗口函数，只需要包装窗口信息
+    public static class UrlViewCountResult extends ProcessWindowFunction < Long,
+        UrlViewCount, String, TimeWindow >
+        {
+            @Override
+            public void process(String url, Context context, Iterable < Long > elements, Collector < UrlViewCount > out) throws Exception
+            {
+                // 结合窗口信息，包装输出内容
+                Long start = context.window().getStart();
+                Long end = context.window().getEnd();
+                out.collect(new UrlViewCount(url, elements.iterator().next(), start, end));
+            }
+        }
+        // 自定义处理函数，排序取 top n
+    public static class TopN extends KeyedProcessFunction < Long, UrlViewCount,
+        String >
+        {
+            206
+            // 将 n 作为属性
+            private Integer n;
+            // 定义一个列表状态
+            private ListState < UrlViewCount > urlViewCountListState;
+            public TopN(Integer n)
+            {
+                this.n = n;
+            }
+            @Override
+            public void open(Configuration parameters) throws Exception
+            {
+                // 从环境中获取列表状态句柄
+                urlViewCountListState = getRuntimeContext().getListState(new ListStateDescriptor < UrlViewCount > ("url-view-count-list", Types.POJO(UrlViewCount.class)));
+            }
+            @Override
+            public void processElement(UrlViewCount value, Context ctx, Collector < String > out) throws Exception
+            {
+                // 将 count 数据添加到列表状态中，保存起来
+                urlViewCountListState.add(value);
+                // 注册 window end + 1ms 后的定时器，等待所有数据到齐开始排序
+                ctx.timerService().registerEventTimeTimer(ctx.getCurrentKey() + 1);
+            }
+            @Override
+            public void onTimer(long timestamp, OnTimerContext ctx, Collector < String > out) throws Exception
+            {
+                // 将数据从列表状态变量中取出，放入 ArrayList，方便排序
+                ArrayList < UrlViewCount > urlViewCountArrayList = new ArrayList < > ();
+                for(UrlViewCount urlViewCount: urlViewCountListState.get())
+                {
+                    urlViewCountArrayList.add(urlViewCount);
+                }
+                // 清空状态，释放资源
+                urlViewCountListState.clear();
+                // 排序
+                urlViewCountArrayList.sort(new Comparator < UrlViewCount > ()
+                {
+                    @Override
+                    public int compare(UrlViewCount o1, UrlViewCount o2)
+                    {
+                        return o2.count.intValue() - o1.count.intValue();
+                    }
+                });
+                // 取前两名，构建输出结果
+                StringBuilder result = new StringBuilder();
+                result.append("========================================\n");
+                result.append("窗口结束时间：" + new Timestamp(timestamp - 1) + "\n");
+                for(int i = 0; i < this.n; i++)
+                {
+                    UrlViewCount UrlViewCount = urlViewCountArrayList.get(i);
+                    String info = "No." + (i + 1) + " " + "url：" + UrlViewCount.url + " " + "浏览量：" + UrlViewCount.count + "\n";
+                    result.append(info);
+                }
+                result.append("========================================\n");
+                out.collect(result.toString());
+            }
+        }
+}
+```
