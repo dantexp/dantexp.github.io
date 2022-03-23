@@ -619,3 +619,184 @@ Window 可以分成两类：
 session 窗口分配器通过 session 活动来对元素进行分组，session 窗口跟滚动窗口和滑动窗口相比，不会有重叠和固定的开始时间和结束时间的情况，相反，当它在一个固定的时间周期内不再收到元素，即非活动间隔产生，那个这个窗口就会关闭。一个 session 窗口通过一个 session 间隔来配置，这个session间隔定义了非活跃周期的长度，当这个非活跃周期产生，那么当前的 session 将关闭并且后续的元素将被分配到新的 session 窗口中去。
 
 ![会话窗口](images/SessionWindows.png)
+
+### 7. 处理函数
+
+
+之前所介绍的流处理 API，无论是基本的转换、聚合，还是更为复杂的窗口操作，其实都是基于 DataStream 进行转换的；所以可以统称为 DataStream API，这也是 Flink 编程的核心。而我们知道，为了让代码有更强大的表现力和易用性，Flink 本身提供了多层 API，DataStream API 只是中间的一环，如图 所示：
+
+![Flink提供的多层Api](images/api.png)
+
+
+在更底层，我们可以不定义任何具体的算子（比如 map，filter，或者 window），而只是提炼出一个统一的“处理”（process）操作——它是所有转换算子的一个概括性的表达，可以自定义处理逻辑，所以这一层接口就被叫作“处理函数”（process function）。
+
+
+
+>处理函数是算子的大招-它可以实现其他基本算子做不到的功能。处理函数提供了一个“定时服务”（TimerService），我们可以通过它访问流中的事件（event）、时间戳（timestamp）、水位线（watermark），甚至可以注册“定时事件”。而且处理函数继承了 AbstractRichFunction 抽象类，所以拥有富函数类的所有特性，同样可以访问状态（state）和其他运行时信息。此外，处理函数还可以直接将数据输出到侧输出流（side output）中。所以，处理函数是最为灵活的处理方法，可以实现各种自定义的业务逻辑；同时也是整个 DataStream API 的底层基础。
+
+#### 7.1 基本处理函数（ProcessFunction）
+
+这里我们在 ProcessFunction 中重写了.processElement()方法，自定义了一种处理逻辑：当数据的 user 为“Mary”时，将其输出一次；而如果为“Bob”时，将 user 输出两次。这里的输 出 ， 是 通 过 调 用 out.collect() 来实现的。另外我们还可以调用ctx.timerService().currentWatermark() 来 获 取 当 前 的 水 位 线 打 印 输 出 。所 以 可 以 看 到 ，ProcessFunction 函数有点像 FlatMapFunction 的升级版。可以实现 Map、Filter、FlatMap 的所有功能。很明显，处理函数非常强大，能够做很多之前做不到的事情。
+
+```java
+public class ProcessFunctionExample {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        env.addSource(new ClickSource()).assignTimestampsAndWatermarks(WatermarkStrategy.<Event>forMonotonousTimestamps()
+        .withTimestampAssigner(new SerializableTimestampAssigner<Event>() {
+                @Override
+                public long extractTimestamp(Event event, long l) {
+                    return event.timestamp;
+                }
+            })).process(new ProcessFunction<Event, String>() {
+                @Override
+                public void processElement(Event value, Context ctx,
+                    Collector<String> out) throws Exception {
+                    if (value.user.equals("Mary")) {
+                        out.collect(value.user);
+                    } else if (value.user.equals("Bob")) {
+                        out.collect(value.user);
+                        out.collect(value.user);
+                    }
+
+                    System.out.println(ctx.timerService().currentWatermark());
+                }
+            }).print();
+        env.execute();
+    }
+}
+
+```
+
+#### 7.2 按键分区处理函数（KeyedProcessFunction）
+
+在 Flink 程序中，为了实现数据的聚合统计，或者开窗计算之类的功能，我们一般都要先用 keyBy 算子对数据流进行“按键分区”，得到一个 KeyedStream。也就是指定一个键（key），按照它的哈希值（hash code）将数据分成不同的“组”，然后分配到不同的并行子任务上执行计算；这相当于做了一个逻辑分流的操作，从而可以充分利用并行计算的优势实时处理海量数据。
+
+另外我们在上节中也提到，只有在 KeyedStream 中才支持使用 TimerService 设置定时器的操作。所以一般情况下，我们都是先做了 keyBy 分区之后，再去定义处理操作；代码中更加常见的处理函数是 KeyedProcessFunction，最基本的ProcessFunction 反而出镜率没那么高。
+
+
+
+处理时间定时器demo
+
+```java
+public class ProcessingTimeTimerTest
+{
+    public static void main(String[] args) throws Exception
+    {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        // 处理时间语义，不需要分配时间戳和 watermark
+        SingleOutputStreamOperator < Event > stream = env.addSource(new ClickSource());
+        // 要用定时器，必须基于 KeyedStream
+        stream.keyBy(data - > true).process(new KeyedProcessFunction < Boolean, Event, String > ()
+        {
+            @Override
+            public void processElement(Event value, Context ctx, Collector < String > out) throws Exception
+            {
+                Long currTs = ctx.timerService().currentProcessingTime();
+                out.collect("数据到达，到达时间：" + new Timestamp(currTs));
+                // 注册一个 10 秒后的定时器
+                ctx.timerService().registerProcessingTimeTimer(currTs + 10 * 1000 L);
+            }
+            @Override
+            public void onTimer(long timestamp, OnTimerContext ctx, Collector < String > out) throws Exception
+            {
+                out.collect("定时器触发，触发时间：" + new Timestamp(timestamp));
+            }
+        }).print();
+        env.execute();
+    }
+}
+
+```
+
+
+
+在上面的代码中，由于定时器只能在 KeyedStream 上使用，所以先要进行 keyBy；这里的.keyBy(data -> true)是将所有数据的 key都指定为了 true，其实就是所有数据拥有相同的 key，会分配到同一个分区。
+
+之后我们自定义了一个 KeyedProcessFunction，其中.processElement()方法是每来一个数据都会调用一次，主要是定义了一个 10 秒之后的定时器；而.onTimer()方法则会在定时器触发时调用。所以我们会看到，程序运行后先在控制台输出“数据到达”的信息，等待 10 秒之后，又会输出“定时器触发”的信息，打印出的时间间隔正是 10 秒。
+
+事件时间定时器demo
+```java
+public class EventTimeTimerTest
+{
+    public static void main(String[] args) throws Exception
+        {
+            StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+            env.setParallelism(1);
+            SingleOutputStreamOperator < Event > stream = env.addSource(new CustomSource()).assignTimestampsAndWatermarks(WatermarkStrategy. < Event > forMonot onousTimestamps().withTimestampAssigner(new SerializableTimestampAssigner < Event > ()
+            {
+                @Override
+                public long extractTimestamp(Event element, long recordTimestamp)
+                {
+                    return element.timestamp;
+                }
+            }));
+            // 基于 KeyedStream 定义事件时间定时器
+            stream.keyBy(data - > true).process(new KeyedProcessFunction < Boolean, Event, String > ()
+            {
+                @Override
+                public void processElement(Event value, Context ctx, Collector < String > out) throws Exception
+                {
+                    out.collect("数据到达，时间戳为：" + ctx.timestamp());
+                    out.collect(" 数据到达，水位线为： " + ctx.timerService().currentWatermark() + "\n -------分割线-------");
+                    // 注册一个 10 秒后的定时器
+                    ctx.timerService().registerEventTimeTimer(ctx.timestamp() + 10 * 1000 L);
+                }
+                @Override
+                public void onTimer(long timestamp, OnTimerContext ctx, Collector < String > out) throws Exception
+                {
+                    out.collect("定时器触发，触发时间：" + timestamp);
+                }
+            }).print();
+            env.execute();
+        }
+        // 自定义测试数据源
+    public static class CustomSource implements SourceFunction < Event >
+    {
+        @Override
+        public void run(SourceContext < Event > ctx) throws Exception
+        {
+            // 直接发出测试数据
+            ctx.collect(new Event("Mary", "./home", 1000 L));
+            // 为了更加明显，中间停顿 5 秒钟
+            Thread.sleep(5000 L);
+            // 发出 10 秒后的数据
+            ctx.collect(new Event("Mary", "./home", 11000 L));
+            Thread.sleep(5000 L);
+            // 发出 10 秒+1ms 后的数据
+            ctx.collect(new Event("Alice", "./cart", 11001 L));
+            Thread.sleep(5000 L);
+        }
+        @Override
+        public void cancel()
+        {}
+    }
+}
+
+```
+
+输出结果如下：
+
+![Flink提供的多层Api](images/eventTimeTimer.png)
+
+每来一条数据，都会输出两行“数据到达”的信息，并以分割线隔开；两条数据到达的时
+间间隔为 5 秒。当第三条数据到达后，随后立即输出一条定时器触发的信息；再过 5 秒之后，
+剩余两条定时器信息输出，程序运行结束。
+
+我们可以发现，数据到来之后，当前的水位线与时间戳并不是一致的。当第一条数据到来，
+时间戳为 1000，可水位线的生成是周期性的（默认 200ms 一次），不会立即发生改变，所以依
+然是最小值 Long.MIN_VALUE；随后只要到了水位线生成的时间点（200ms 到了），就会依据
+当前的最大时间戳 1000 来生成水位线了。这里我们没有设置水位线延迟，默认需要减去 1 毫
+秒，所以水位线推进到了 999。而当时间戳为 11000 的第二条数据到来之后，水位线同样没有
+立即改变，仍然是 999，就好像总是“滞后”数据一样。
+
+这样程序的行为就可以得到合理解释了。事件时间语义下，定时器触发的条件就是水位线
+推进到设定的时间。第一条数据到来后，设定的定时器时间为 1000 + 10 * 1000 = 11000；而当
+时间戳为 11000 的第二条数据到来，水位线还处在 999 的位置，当然不会立即触发定时器；而
+之后水位线会推进到 10999，同样是无法触发定时器的。必须等到第三条数据到来，将水位线
+真正推进到 11000，就可以触发第一个定时器了。第三条数据发出后再过 5 秒，没有更多的数
+据生成了，整个程序运行结束将要退出，此时 Flink 会自动将水位线推进到长整型的最大值
+（Long.MAX_VALUE）。于是所有尚未触发的定时器这时就统一触发了，我们就在控制台看到
+了后两个定时器的触发信息。
