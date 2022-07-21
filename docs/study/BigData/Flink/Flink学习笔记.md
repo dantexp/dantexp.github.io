@@ -1045,7 +1045,7 @@ public class KeyedProcessTopN
     public static class TopN extends KeyedProcessFunction < Long, UrlViewCount,
         String >
         {
-            206
+            
             // 将 n 作为属性
             private Integer n;
             // 定义一个列表状态
@@ -1104,3 +1104,17 @@ public class KeyedProcessTopN
         }
 }
 ```
+
+## Flink 复杂事件处理Api （Flink CEP）
+
+### 1 什么是复杂事件处理CEP
+
+一个或多个由简单事件构成的事件流通过一定的规则匹配，然后输出用户想得到的数据，满足规则的复杂事件。
+特点：
+* 目标：从有序的简单事件流中发现一些高阶特征
+* 输入：一个或多个由简单事件构成的事件流
+* 处理：识别简单事件之间的内在联系，多个符合一定规则的简单事件构成复杂事件
+* 输出：满足规则的复杂事件
+
+
+![cep介绍](images/cep.png)
