@@ -1107,7 +1107,7 @@ public class KeyedProcessTopN
 
 ## Flink 复杂事件处理Api （Flink CEP）
 
-### 1 什么是复杂事件处理CEP
+### 1. 什么是复杂事件处理CEP
 
 一个或多个由简单事件构成的事件流通过一定的规则匹配，然后输出用户想得到的数据，满足规则的复杂事件。
 特点：
@@ -1118,3 +1118,126 @@ public class KeyedProcessTopN
 
 
 ![cep介绍](images/cep.png)
+
+CEP 用于分析低延迟、频繁产生的不同来源的事件流。CEP 可以帮助在复杂的、
+不相关的事件流中找出有意义的模式和复杂的关系，以接近实时或准实时的获得通
+知并阻止一些行为。
+CEP 支持在流上进行模式匹配，根据模式的条件不同，分为连续的条件或不连
+续的条件；模式的条件允许有时间的限制，当在条件范围内没有达到满足的条件时，
+会导致模式匹配超时。
+看起来很简单，但是它有很多不同的功能：
+*  输入的流数据，尽快产生结果
+*  在 2 个 event 流上，基于时间进行聚合类的计算
+*  提供实时/准实时的警告和通知
+*  在多样的数据源中产生关联并分析模式
+*  高吞吐、低延迟的处理
+  
+市场上有多种 CEP 的解决方案，例如 Spark、Samza、Beam 等，但他们都没有
+提供专门的 library 支持。但是 Flink 提供了专门的 CEP library。主要包含了如下组件：
+* Event Stream
+* patten 定义
+* patten 检测输出
+  
+
+
+### 2. 处理事件的规则，叫做模式（pattern）
+
+
+Flink CEP 提供了 Pattern API，用于对输入流数据进行复杂事件规则定义，
+用来提取符合规则的事件序列
+
+每个 Pattern 都应该包含几个步骤，或者叫做 state。从一个 state 到另一个 state，
+通常我们需要定义一些条件，例如下列的代码：
+
+```java
+val loginFailPattern = Pattern.begin[LoginEvent]("begin")
+ .where(_.eventType.equals("fail"))
+ .next("next")
+ .where(_.eventType.equals("fail"))
+ .within(Time.seconds(10))
+```
+
+
+每个 state 都应该有一个标示：例如上面代码的"begin"、"next"
+
+每个 state 都需要有一个唯一的名字，而且需要一个 filter 来过滤条件，这个过
+滤条件定义事件需要符合的条件，例如:
+.where(_.eventType.equals("fail"))
+
+我们也可以通过 subtype 来限制 event 的子类型：
+start.subtype(SubEvent.class).where(...);
+
+事实上，你可以多次调用 subtype 和 where 方法；而且如果 where 条件是不相关
+的，你可以通过 or 来指定一个单独的 filter 函数：
+pattern.where(...).or(...);
+
+之后，我们可以在此条件基础上，通过 next 或者 followedBy 方法切换到下一个
+state，next 的意思是说上一步符合条件的元素之后紧挨着的元素；而 followedBy 并
+不要求一定是挨着的元素。这两者分别称为严格近邻和非严格近邻。
+
+
+``` java
+val strictNext = start.next("middle")
+val nonStrictNext = start.followedBy("middle")
+```
+
+最后，我们可以将所有的 Pattern 的条件限定在一定的时间范围内：
+``` java
+next.within(Time.seconds(10)
+```
+
+### 3. pattern 检测
+
+通过一个 input DataStream 以及刚刚我们定义的 Pattern，我们可以创建一个
+PatternStream：
+
+
+``` java
+val input = ...
+val pattern = ...
+val patternStream = CEP.pattern(input, pattern);
+```
+
+### 4. select 输出
+
+一旦获得 PatternStream，我们就可以通过 select 或 flatSelect，从一个 Map 序列
+找到我们需要的警告信息。
+
+#### 4.1 select 
+select 方法需要实现一个 PatternSelectFunction，通过 select 方法来输出需要的
+警告。它接受一个 Map 对，包含 string/event，其中 key 为 state 的名字，event 则为
+真实的 Event。
+
+``` java
+val loginFailDataStream = patternStream
+ .select((pattern: Map[String, Iterable[LoginEvent]]) => {
+ val first = pattern.getOrElse("begin", null).iterator.next()
+ val second = pattern.getOrElse("next", null).iterator.next()
+ Warning(first.userId, first.eventTime, second.eventTime, "warning")
+ })
+
+```
+
+#### 4.1 flatSelect
+通过实现 PatternFlatSelectFunction，实现与 select 相似的功能。唯一的区别就
+是 flatSelect 方法可以返回多条记录，它通过一个 Collector[OUT]类型的参数来将要
+输出的数据传递到下游。
+
+#### 4.2 超时事件获取
+通过 within 方法，我们的 parttern 规则将匹配的事件限定在一定的窗口范围内。
+当有超过窗口时间之后到达的 event，我们可以通过在 select 或 flatSelect 中，实现
+PatternTimeoutFunction 和 PatternFlatTimeoutFunction 来处理这种情况。
+
+``` java
+val patternStream: PatternStream[Event] = CEP.pattern(input, pattern)
+val outputTag = OutputTag[String]("side-output")
+val result: SingleOutputStreamOperator[ComplexEvent] = patternStream.select(outputTag)
+{
+    (pattern: Map[String, Iterable[Event]], timestamp: Long) => TimeoutEvent()
+} 
+{
+ pattern: Map[String, Iterable[Event]] => ComplexEvent()
+}
+val timeoutResult: DataStream<TimeoutEvent> = result.getSideOutput(outputTag)
+
+```
